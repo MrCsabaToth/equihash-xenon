@@ -4,10 +4,12 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+// To sooth VS Code
 #include <time.h>
+#include <omp.h>
 
 #define CONTEXT_SIZE 178033152
-#define ITERATIONS 10
+#define ITERATIONS 100
 
 //Linkage with assembly
 //EhPrepare takes in 136 bytes of input. The remaining 4 bytes of input is fed as nonce to EhSolver.
@@ -18,21 +20,22 @@ extern char testinput[];
 
 int main(void)
 {
-	void *context_alloc, *context, *context_end;
+	int thread_count = omp_get_max_threads();
+	void *context_alloc;
+	void* contexts[thread_count];
 	uint32_t *pu32;
 	uint64_t *pu64, previous_rdtsc;
 	uint8_t inputheader[144];	//140 byte header
 	FILE *infile, *outfile;
 	struct timespec time0, time1;
 	long t0, t1;
-	int32_t numsolutions, total_solutions;
-	uint32_t nonce, delta_time, total_time;
+	int32_t numsolutions[thread_count], thread_solutions[thread_count], total_solutions;
+	uint32_t nonce, delta_time[thread_count], total_time[thread_count], total_times;
 	int i, j;
 
-	context_alloc = malloc(CONTEXT_SIZE+4096);
-	context = (void*) (((long) context_alloc+4095) & -4096);
-	context_end = context + CONTEXT_SIZE;
+	printf("Thread count %d\n", thread_count);
 
+	context_alloc = malloc((CONTEXT_SIZE + 4096) * thread_count);
 	infile = 0;
 	infile = fopen("input.bin", "rb");
 	if (infile) {
@@ -44,34 +47,56 @@ int main(void)
 		memcpy(inputheader, testinput, 140);
 	}
 
-
-	EhPrepare(context, (void *) inputheader);
+	#pragma omp parallel for
+	for (i = 0; i < thread_count; i++) {
+		contexts[i] = (void*) (((long) context_alloc + 4095) & -4096 + i * CONTEXT_SIZE);
+		printf("context %d assigned %p, %ld\n", i, contexts[i], ((long) context_alloc + 4095) & -4096 + i * CONTEXT_SIZE);
+		printf("context will be prepared for %d\n", i);
+		EhPrepare(contexts[i], (void *) inputheader);
+		printf("context prepared for %d\n", i);
+	}
 
 	//Warm up, timing not taken into average
 	nonce = 0;
 	clock_gettime(CLOCK_MONOTONIC, &time0);
-	numsolutions = EhSolver(context, nonce);
+	#pragma omp parallel for
+	for (i = 0; i < thread_count; i++) {
+		numsolutions[i] = EhSolver(contexts[i], nonce);
+		thread_solutions[i] = 0;
+		total_time[i] = 0;
+	}
 	clock_gettime(CLOCK_MONOTONIC, &time1);
-	delta_time = (uint32_t) ((time1.tv_sec * 1000000000 + time1.tv_nsec)
+	delta_time[0] = (uint32_t) ((time1.tv_sec * 1000000000 + time1.tv_nsec)
 			- (time0.tv_sec * 1000000000 + time0.tv_nsec))/1000000;
-	printf("(Warm up) Time: %u ms, solutions: %u\n", delta_time, numsolutions);
+	printf("(Warm up) Time: %u ms, solutions: %u\n", delta_time, numsolutions[i]);
 
 	printf("Running %d iterations...\n", ITERATIONS);
 	nonce = 58;	//arbritary number to get 19 solutions in 10 iterations (to match 1.88 solutions per run)
-	total_time = total_solutions = 0;
-	for (i=0; i<ITERATIONS; i++) {
+	total_solutions = 0;
+	#pragma omp parallel for
+	for (i = 0; i < ITERATIONS; i++) {
 		clock_gettime(CLOCK_MONOTONIC, &time0);
-		numsolutions = EhSolver(context, nonce);
+		int tid = omp_get_num_threads();
+		numsolutions[tid] = EhSolver(contexts[i % tid], nonce + i);
 		clock_gettime(CLOCK_MONOTONIC, &time1);
-		nonce++;
-		delta_time = (uint32_t) ((time1.tv_sec * 1000000000 + time1.tv_nsec)
+		delta_time[tid] = (uint32_t) ((time1.tv_sec * 1000000000 + time1.tv_nsec)
 				- (time0.tv_sec * 1000000000 + time0.tv_nsec))/1000000;
-		total_time += delta_time;
-		total_solutions += numsolutions;
-		printf("Time: %u ms, solutions: %u\n", delta_time, numsolutions);
+		total_time[tid] += delta_time[tid];
+		thread_solutions[tid] += numsolutions[tid];
+		printf("Time: %u ms, solutions: %u\n", delta_time, numsolutions[tid]);
 	}
 
-	printf("Average time: %d ms; %.3f Sol/s\n", total_time/ITERATIONS, (double) 1000.0*total_solutions/total_time);
+
+	for (i = 0; i < thread_count; i++) {
+		printf("Average time for %d: %d ms; %.3f Sol/s\n",
+				i,
+				total_time[i] / ITERATIONS / thread_count,
+				(double) 1000.0 * thread_solutions[i] / total_time[i]);
+		total_solutions += thread_solutions[i];
+		total_times += total_time[i];
+	}
+	printf("Average time: %d ms; %.3f Sol/s\n",
+			total_times / ITERATIONS, (double) 1000.0 * total_solutions / total_times);
 
 	free(context_alloc);
 	return 0;
