@@ -36,7 +36,7 @@ int main(void)
 	int i;
 
 	Blake2PrepareMidstate4(pmidstate, testdata);
-	outfile = fopen("out.bin", "wb");
+	outfile = fopen("out2.bin", "wb");
 
 	for (i=0; i<1048576; i+=4) {
 		Blake2Run4(phashout, pmidstate, i);
